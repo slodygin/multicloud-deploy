@@ -1,0 +1,334 @@
+stages:
+  - gcloud-create
+  - aws-create
+  - kvm-create
+  - deploy-monitoring
+  - gcloud-destroy
+  - aws-destroy
+  - kvm-destroy
+variables:
+  GCLOUD: "no"
+  KVM: "yes"
+  AWS: "no"
+  EXT_IP: 192.168.0.1 #change to real ip here if deploy to KVM
+  SSH_ARGS2: "-o StrictHostKeyChecking=no"
+  IFACE: enp41s0      #change to real network interface here if deploy to KVM
+  K8S_DOMAIN: fdsa.pro
+
+gcloud-create:
+  stage: gcloud-create
+  image:
+    name: registry.fdsa.pro/helmcharts-test:latest
+    entrypoint: [""]
+  script:
+    - pwd
+    - cd gcloud
+    - cat $GCLOUD_KEY > service-account.json
+    - export STAGE_NAME=$CI_COMMIT_BRANCH
+    - export CI_PROJECT_ID=1
+    - export TFB_USER=$TFB_USER
+    - export TFB_TOKEN=$TFB_TOKEN
+    - terraform init
+                -backend-config="address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME"
+                -backend-config="lock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="unlock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="username=$TFB_USER"
+                -backend-config="password=$TFB_TOKEN"
+                -backend-config="lock_method=POST"
+                -backend-config="unlock_method=DELETE"
+                -backend-config="retry_wait_min=5"
+    - terraform plan
+    - terraform apply -auto-approve
+    - gcloud auth activate-service-account --key-file  service-account.json
+    - gcloud config set project k8s-testing-151505 --quiet
+    - gcloud container clusters list
+    - gcloud container clusters get-credentials gke-dev-cluster --region=us-central1-a
+    - cp ~/.kube/config /artifacts/config-${CI_COMMIT_BRANCH}
+    - cp ~/.kube/config config-${CI_COMMIT_BRANCH}
+    - kubectl create deployment nginx --image=nginx --dry-run -o yaml | kubectl apply -f -
+    - kubectl create service clusterip nginx --tcp=80:80 --dry-run -o yaml | kubectl apply -f -
+    - kubectl create ingress  nginx --rule="/=nginx:80" --dry-run -o yaml | kubectl apply -f -
+    - echo "Wait 10 minutes for ingress became ready"
+    - for i in $(seq 1 60);do IP=$(kubectl get ingress |grep -v ADDRESS |awk '{print $4}');echo -n " DEBUG. attempt $i; sleep 10 seconds and try to curl $IP ..."; sleep 10; if curl -s $IP|grep "Welcome to nginx" 2>/dev/null ;then break;fi ;done
+  after_script:
+    - cd gcloud
+    - rm -f service-account.json
+    - rm -f ~/.kube/config
+  artifacts:
+    paths:
+      - gcloud/config-${CI_COMMIT_BRANCH}
+  only:
+    variables:
+      - $GCLOUD == "yes"
+  when: manual
+  except:
+    - main
+
+aws-create:
+  stage: aws-create
+  image:
+    name: registry.fdsa.pro/helmcharts-test:latest
+    entrypoint: [""]
+  script:
+    - pwd
+    - cd aws
+    - mkdir ~/.aws
+    - echo "[default]" > ~/.aws/credentials
+    - echo "aws_access_key_id=$AWS_ACCESS_KEY" >>~/.aws/credentials
+    - echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" >> ~/.aws/credentials
+    - export STAGE_NAME=$CI_COMMIT_BRANCH
+    - export CI_PROJECT_ID=1
+    - export TFB_USER=$TFB_USER
+    - export TFB_TOKEN=$TFB_TOKEN
+    - terraform init
+                -backend-config="address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME"
+                -backend-config="lock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="unlock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="username=$TFB_USER"
+                -backend-config="password=$TFB_TOKEN"
+                -backend-config="lock_method=POST"
+                -backend-config="unlock_method=DELETE"
+                -backend-config="retry_wait_min=5"
+    - terraform plan
+    - terraform apply -auto-approve
+    - aws eks list-clusters --region=eu-west-1
+    - aws eks --region=eu-west-1 update-kubeconfig --name=learning-k8s
+    - cp ~/.kube/config /artifacts/config-${CI_COMMIT_BRANCH}
+    - cp ~/.kube/config config-${CI_COMMIT_BRANCH}
+    - kubectl create deployment nginx --image=nginx --dry-run -o yaml | kubectl apply -f -
+    - kubectl create service clusterip nginx --tcp=80:80 --dry-run -o yaml | kubectl apply -f -
+    - kubectl create ingress  nginx --rule="/=nginx:80" --dry-run -o yaml | kubectl apply -f -
+    - echo "Wait 10 minutes for ingress became ready"
+    - for i in $(seq 1 60);do IP=$(kubectl get ingress |grep -v ADDRESS |awk '{print $4}');echo -n " DEBUG. attempt $i; sleep 10 seconds and try to curl $IP ..."; sleep 10; if curl -s $IP|grep "Welcome to nginx" 2>/dev/null ;then break;fi ;done
+  after_script:
+    - cd aws
+    - rm -f service-account.json
+    - rm -f ~/.aws/credentials
+  artifacts:
+    paths:
+      - gcloud/config-${CI_COMMIT_BRANCH}
+  only:
+    variables:
+      - $AWS == "yes"
+  when: manual
+  except:
+    - main
+
+kvm-create:
+  stage: kvm-create
+  image:
+    name: registry.fdsa.pro/helmcharts-test:latest
+    entrypoint: [""]
+  script:
+    - pwd
+    - cd kvm
+    - mkdir -p ~/.ssh ~/.kube
+    - id
+    - cat $ANSIBLE_SSH_KEY > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/ && chmod 600 ~/.ssh/id_rsa
+    - if ! [ -f "/artifacts/debian-11-genericcloud-amd64.qcow2" ];then wget -O /artifacts/debian-11-genericcloud-amd64.qcow2 https://cdimage.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2; qemu-img resize /artifacts/debian-11-genericcloud-amd64.qcow2 50G;fi
+    - export STAGE_NAME=$CI_COMMIT_BRANCH
+    - export CI_PROJECT_ID=1
+    - export TFB_USER=$TFB_USER
+    - export TFB_TOKEN=$TFB_TOKEN
+    - terraform init
+                -backend-config="address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME"
+                -backend-config="lock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="unlock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="username=$TFB_USER"
+                -backend-config="password=$TFB_TOKEN"
+                -backend-config="lock_method=POST"
+                -backend-config="unlock_method=DELETE"
+                -backend-config="retry_wait_min=5"
+    - terraform plan
+    - terraform apply -auto-approve
+    - echo "Wait 10 minutes when VMs became ready..."
+    - for i in $(seq 1 60);do echo -n " DEBUG. attempt $i; sleep 10 seconds and check if VM is up ..."; terraform refresh; sleep 10; if terraform output -json |grep -v DEBUG  |jq .ips.value[0][]|awk -F\" '{print $2}' |grep "[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*" 2>/dev/null ;then break;fi;echo ;done
+    - export IP1=$(terraform output -json |grep -v DEBUG  |jq .ips.value[0][]|awk -F\" '{print $2}')
+    - export IP2=$(terraform output -json |grep -v DEBUG  |jq .ips.value[1][]|awk -F\" '{print $2}')
+    - export IP3=$(terraform output -json |grep -v DEBUG  |jq .ips.value[2][]|awk -F\" '{print $2}')
+    - echo "VM's ips -> $IP1 $IP2 $IP3"
+v    - if ssh $SSH_ARGS2 -q ansible@$IP1 sudo test -f /root/.kube/config ;then KUBE_CHECK="yes";fi
+    - echo "KUBE_CHECK=$KUBE_CHECK"
+    - if [ "$KUBE_CHECK" == "yes" ] ; then ssh $SSH_ARGS2 ansible@$IP1 sudo cat /root/.kube/config |sed "s/127.0.0.1/$IP1/g" > ~/.kube/config; cat ~/.kube/config | sed "s/$IP1/$EXT_IP/g" > config-$CI_COMMIT_BRANCH;fi
+    - if [ "$KUBE_CHECK" == "yes" ] ; then if kubectl get cs 2>/dev/null |grep Healthy |wc -l |grep "^5$">/dev/null ;then KUBE_EXISTS="yes";fi;fi
+    - echo "KUBE_EXISTS=$KUBE_EXISTS"
+    - echo "do k8s install here"
+    - kubectl create deployment nginx --image=nginx --dry-run -o yaml | kubectl apply -f -
+    - kubectl create service clusterip nginx --tcp=80:80 --dry-run -o yaml | kubectl apply -f -
+    - kubectl create ingress  nginx --rule="/=nginx:80" --dry-run -o yaml | kubectl apply -f -
+    - echo "Wait 10 minutes for ingress became ready"
+    - for i in $(seq 1 60);do echo -n " DEBUG. attempt $i; sleep 10 seconds and try to curl $IP1 ..."; sleep 10; if curl -s $IP1|grep "Welcome to nginx" 2>/dev/null ;then break;fi ;done
+    - echo "setup iptables"
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 80   -j DNAT --to-destination $IP1:80   || ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -I PREROUTING 1 -i $IFACE -p tcp --dport 80   -j DNAT --to-destination $IP1:80
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 443  -j DNAT --to-destination $IP1:443  || ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -I PREROUTING 1 -i $IFACE -p tcp --dport 443  -j DNAT --to-destination $IP1:443
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 6443 -j DNAT --to-destination $IP1:6443 || ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -I PREROUTING 1 -i $IFACE -p tcp --dport 6443 -j DNAT --to-destination $IP1:6443
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 6444 -j DNAT --to-destination $IP2:6443 || ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -I PREROUTING 1 -i $IFACE -p tcp --dport 6444 -j DNAT --to-destination $IP2:6443
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 6445 -j DNAT --to-destination $IP3:6443 || ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -I PREROUTING 1 -i $IFACE -p tcp --dport 6445 -j DNAT --to-destination $IP3:6443
+  after_script:
+    - cd kvm
+    - rm -f ~/.ssh/id_rsa
+    - rm -f ~/.kube/config
+  artifacts:
+    paths:
+      - kvm/config-${CI_COMMIT_BRANCH}
+  only:
+    variables:
+      - $KVM == "yes"
+  when: manual
+  except:
+    - main
+
+deploy-monitoring:
+  stage: deploy-monitoring
+  image:
+    name: registry.fdsa.pro/helmcharts-test:latest
+    entrypoint: [""]
+  script:
+    - pwd
+    - mkdir -p ~/.ssh/ ~/.kube/
+    - cat $ANSIBLE_SSH_KEY > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/ && chmod 600 ~/.ssh/id_rsa
+    - export STAGE_NAME=$CI_COMMIT_BRANCH
+    - cp /artifacts/config-$CI_COMMIT_BRANCH ~/.kube/config
+    - if kubectl get ns | grep kubernetes-dashboard 2>/dev/null 1>/dev/null; then echo "kubernetes-dashboard namespace already exists"; KUBEDASH_EXISTS="yes";fi
+    - if [ "$KUBEDASH_EXISTS"  != "yes" ];then kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml; fi
+    - if [ "$KUBEDASH_EXISTS"  != "yes" ];then kubectl apply -f /apps/unnamed/dashboard-user.yml; fi
+    - echo "Token for kubernetes-dashboard ..."
+    - kubectl -n kubernetes-dashboard create token admin-user
+    - if kubectl get ns | grep monitoring 2>/dev/null 1>/dev/null; then echo "monitoring namespace already exists"; MONITORING_EXISTS="yes";fi
+    - if [ "$MONITORING_EXISTS" != "yes" ];then kubectl create namespace monitoring --dry-run -o yaml | kubectl apply -f -; fi
+    - if [ "$MONITORING_EXISTS" != "yes" ];then helm repo add grafana https://grafana.github.io/helm-charts; fi
+    - if [ "$MONITORING_EXISTS" != "yes" ];then helm upgrade --install loki grafana/loki-stack --namespace monitoring  --set promtail.enabled=true,promtail.piplineStages[0].cri="{}",grafana.enabled=true,prometheus.enabled=true,prometheus.alertmanager.persistentVolume.enabled=false,prometheus.server.persistentVolume.enabled=false; fi
+    - echo "grafana password ..."
+    - kubectl get secret --namespace monitoring loki-grafana -o jsonpath="{.data.admin-password}" | base64 --decode ; echo
+    - echo "kubectl get all,sc,bd,pvc,pv,ingress -n monitoring -o wide"
+    - echo "kubectl get all,sc,bd,pvc,pv,ingress -n kubernetes-dashboard -o wide"
+  after_script:
+    - cd kvm
+    - rm -f ~/.ssh/id_rsa
+    - rm -f ~/.kube/config
+  when: manual
+  except:
+    - main
+
+gcloud-destory:
+  stage: gcloud-destroy
+  image:
+    name: registry.fdsa.pro/helmcharts-test:latest
+    entrypoint: [""]
+  script:
+    - pwd
+    - cd gcloud
+    - cat $GCLOUD_KEY > service-account.json
+    - export STAGE_NAME=$CI_COMMIT_BRANCH
+    - export CI_PROJECT_ID=1
+    - export TFB_USER=$TFB_USER
+    - export TFB_TOKEN=$TFB_TOKEN
+    - terraform init
+                -backend-config="address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME"
+                -backend-config="lock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="unlock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="username=$TFB_USER"
+                -backend-config="password=$TFB_TOKEN"
+                -backend-config="lock_method=POST"
+                -backend-config="unlock_method=DELETE"
+                -backend-config="retry_wait_min=5"
+    - terraform refresh
+    - terraform destroy -auto-approve
+  after_script:
+    - cd gcloud
+    - rm -f service-account.json
+    - rm -f ~/.kube/config
+  only:
+    variables:
+      - $GCLOUD == "yes"
+  when: manual
+  except:
+    - main
+
+aws-destory:
+  stage: aws-destroy
+  image:
+    name: registry.fdsa.pro/helmcharts-test:latest
+    entrypoint: [""]
+  script:
+    - pwd
+    - cd aws
+    - mkdir ~/.aws
+    - echo "[default]" > ~/.aws/credentials
+    - echo "aws_access_key_id=$AWS_ACCESS_KEY" >>~/.aws/credentials
+    - echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY" >> ~/.aws/credentials
+    - export STAGE_NAME=$CI_COMMIT_BRANCH
+    - export CI_PROJECT_ID=1
+    - export TFB_USER=$TFB_USER
+    - export TFB_TOKEN=$TFB_TOKEN
+    - terraform init
+                -backend-config="address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME"
+                -backend-config="lock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="unlock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="username=$TFB_USER"
+                -backend-config="password=$TFB_TOKEN"
+                -backend-config="lock_method=POST"
+                -backend-config="unlock_method=DELETE"
+                -backend-config="retry_wait_min=5"
+    - terraform refresh
+    - terraform destroy -auto-approve
+  after_script:
+    - cd gcloud
+    - rm -f service-account.json
+    - rm -f ~/.aws/credentials
+  only:
+    variables:
+      - $AWS == "yes"
+  when: manual
+  except:
+    - main
+
+kvm-destroy:
+  stage: kvm-destroy
+  image:
+    name: registry.fdsa.pro/helmcharts-test:latest
+    entrypoint: [""]
+  script:
+    - pwd
+    - cd kvm
+    - mkdir ~/.ssh/
+    - id
+    - cat $ANSIBLE_SSH_KEY > ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/ && chmod 600 ~/.ssh/id_rsa
+    - export HCLOUD_TOKEN=$HCLOUD_TOKEN
+    - export STAGE_NAME=$CI_COMMIT_BRANCH
+    - export CI_PROJECT_ID=217
+    - export TFB_USER=$TFB_USER
+    - export TFB_TOKEN=$TFB_TOKEN
+    - terraform init
+                -backend-config="address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME"
+                -backend-config="lock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="unlock_address=https://git.fdsa.pro/api/v4/projects/$CI_PROJECT_ID/terraform/state/$STAGE_NAME/lock"
+                -backend-config="username=$TFB_USER"
+                -backend-config="password=$TFB_TOKEN"
+                -backend-config="lock_method=POST"
+                -backend-config="unlock_method=DELETE"
+                -backend-config="retry_wait_min=5"
+    - terraform refresh
+    - export IP1=$(terraform output -json |grep -v DEBUG  |jq .ips.value[0][]|awk -F\" '{print $2}')
+    - export IP2=$(terraform output -json |grep -v DEBUG  |jq .ips.value[1][]|awk -F\" '{print $2}')
+    - export IP3=$(terraform output -json |grep -v DEBUG  |jq .ips.value[2][]|awk -F\" '{print $2}')
+    - terraform destroy -auto-approve
+    - echo "destroy iptables"
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 80   -j DNAT --to-destination $IP1:80   && ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -D PREROUTING -i $IFACE -p tcp --dport 80   -j DNAT --to-destination $IP1:80
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 443  -j DNAT --to-destination $IP1:443  && ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -D PREROUTING -i $IFACE -p tcp --dport 443  -j DNAT --to-destination $IP1:443
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 6443 -j DNAT --to-destination $IP1:6443 && ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -D PREROUTING -i $IFACE -p tcp --dport 6443 -j DNAT --to-destination $IP1:6443
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 6444 -j DNAT --to-destination $IP2:6443 && ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -D PREROUTING -i $IFACE -p tcp --dport 6444 -j DNAT --to-destination $IP2:6443
+    - ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -C PREROUTING -i $IFACE -p tcp --dport 6445 -j DNAT --to-destination $IP3:6443 && ssh $SSH_ARGS2 ansible@$EXT_IP sudo iptables -t nat -D PREROUTING -i $IFACE -p tcp --dport 6445 -j DNAT --to-destination $IP3:6443
+  after_script:
+    - cd kvm
+    - rm -f ~/.ssh/id_rsa
+    - rm -f ~/.kube/config
+  only:
+    variables:
+      - $KVM == "yes"
+  when: manual
+  except:
+    - main

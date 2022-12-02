@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  creationTimestamp: null
+  name: nginx
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    kubernetes.io/ingress.class: alb
+    #    alb.ingress.kubernetes.io/scheme: internal
+    #    alb.ingress.kubernetes.io/target-type: instance
+    #    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    #   alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    #    alb.ingress.kubernetes.io/subnets: subnet-070de95374c392b82, subnet-0b57681784006bff3, subnet-098187e4bb4f604cd
+spec:
+  rules:
+  - http:
+      paths:
+      - backend:
+          service:
+            name: nginx
+            port:
+              number: 80
+        path: /
+        pathType: Exact
+status:
+  loadBalancer: {}
